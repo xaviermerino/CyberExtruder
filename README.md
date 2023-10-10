@@ -135,7 +135,7 @@ Below is an excerpt of how the authentic and impostor `.csv` files look like. Th
 092803_01F39,105458_03F35,0.556945
 ```
 
-### Summary Files
+### ✅ Summary Files
 The `summary.txt` and `missing.txt` files provide an overview of which files were processed and which ones failed. They list file paths processed from the container's perspective. For example:
 
 ```
