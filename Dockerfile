@@ -21,4 +21,5 @@ RUN chmod +x /bin/udevadm
 COPY Aureus /Aureus
 
 WORKDIR /Aureus
+RUN cd /Aureus/Aureus_Tracking && ./build.sh
 ENTRYPOINT ["/usr/bin/dumb-init", "--", "./Aureus_Tracking_exe"]
