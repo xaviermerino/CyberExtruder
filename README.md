@@ -48,6 +48,8 @@ Ensure that the `Aureus_Tracking` directory provided in this repository is place
 ```
 
 ## 🛠️ Building the Image 
+> **Note:** If you would rather pull the image directly, visit this [page](https://github.com/xaviermerino/CyberExtruder-Private). It will take you to a private repository with instructions on how to pull the image, provided you have been granted prior access. Once pulled you may skip this section and keep following the guide.
+
 Assuming you have placed the `Aureus_Tracking` directory within the `Aureus` SDK directory as mentioned above, you can build the image using the provided `Dockerfile`. Navigate to the root of the repository and execute the following command:
 
 ```bash
