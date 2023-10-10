@@ -59,7 +59,7 @@ docker build -t cx:6.1.5 .
 The build process will compile the application and place it in the correct directories. Once completed, the image will be labeled as `cx:6.1.5`.
 
 ## 🐳 Running the Image
-After successfully building the image, you can proceed to deploy a container for execution. The container requires the mounting of volumes for the following information:
+After successfully building (or pulling) the image, you can proceed to deploy a container for execution. The container requires the mounting of volumes for the following information:
 
 - Location of the license file
 - Location of the data to be processed
