@@ -1,0 +1,13 @@
+#!/bin/bash
+# udevadm mock program that reports a fake ID_SERIAL
+# because Aureus keeps querying it and it is annoying
+# to see "device node not found"
+
+# Check if the command is "info --query=all --name=/dev/sda"
+if [[ "$*" == "info --query=all --name=/dev/sda" ]]; then
+    echo "ID_SERIAL=INTEL_SSDSC2BX800G4_BTHC618600XXXXXXXX"
+else
+    # If the command does not match, invoke the real udevadm tool
+    /bin/udevadm "$@"
+fi
+
