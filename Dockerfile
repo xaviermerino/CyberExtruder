@@ -1,4 +1,6 @@
 FROM ubuntu:18.04
+LABEL org.opencontainers.image.source=https://github.com/xaviermerino/CyberExtruder-Private
+LABEL org.opencontainers.image.description="CyberExtruder Matcher"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
