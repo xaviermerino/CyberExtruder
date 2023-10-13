@@ -9,7 +9,7 @@ Aureus/Aureus_Tracking/cxutils.h
 Aureus/Aureus_Tracking/cxutils.cpp
 
 # Sample Folder for Images
-sample
+sample_*
 
 # License File
 lic.txt

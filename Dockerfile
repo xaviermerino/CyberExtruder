@@ -1,6 +1,6 @@
 FROM ubuntu:18.04
 LABEL org.opencontainers.image.source=https://github.com/xaviermerino/CyberExtruder-Private
-LABEL org.opencontainers.image.description="CyberExtruder Matcher"
+LABEL org.opencontainers.image.description="CyberExtruder Feature Extractor and Matcher"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -23,5 +23,8 @@ RUN chmod +x /bin/udevadm
 COPY Aureus /Aureus
 
 WORKDIR /Aureus
-RUN cd /Aureus/Aureus_Tracking && ./build.sh
-ENTRYPOINT ["/usr/bin/dumb-init", "--", "./Aureus_Tracking_exe"]
+RUN cd /Aureus/Aureus_Extractor && ./build.sh
+RUN cd /Aureus/Aureus_Matcher && ./build.sh
+COPY scripts/entrypoint.sh entrypoint.sh
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "./entrypoint.sh"]
