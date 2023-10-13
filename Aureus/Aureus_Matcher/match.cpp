@@ -216,7 +216,7 @@ int main(int argc, char* argv[]){
   std::filesystem::path outputDirectory = result["output_dir"].as<std::string>();
   std::filesystem::path probeDirectory = result["probe_dir"].as<std::string>();
   std::filesystem::path galleryDirectory = probeDirectory;
-  if (!result.count("gallery_dir")){
+  if (result.count("gallery_dir")){
     galleryDirectory = result["gallery_dir"].as<std::string>();
   }
 
