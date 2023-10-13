@@ -2,11 +2,12 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=c++
 
 Aureus/*
-!Aureus/Aureus_Tracking
-Aureus/Aureus_Tracking/arm
-Aureus/Aureus_Tracking/linux
-Aureus/Aureus_Tracking/cxutils.h
-Aureus/Aureus_Tracking/cxutils.cpp
+!Aureus/Aureus_Matcher
+!Aureus/Aureus_Extractor
+Aureus/Aureus_*/arm
+Aureus/Aureus_*/linux
+Aureus/Aureus_*/cxutils.h
+Aureus/Aureus_*/cxutils.cpp
 
 # Sample Folder for Images
 sample_*
