@@ -6,7 +6,7 @@ This repository contains code for utilizing the Aureus3D SDK by CyberExtruder fo
 
 >**Important Note:** This repository does not include proprietary Aureus code and requires you to have obtained both the SDK files and an Aureus license. Without these prerequisites, the code in this repository will not function correctly.
 
-Ensure that the `Aureus_Matcher` and `Aureus_Extractor` directories provided in this repository is placed within the main `Aureus` SDK directory. Here is an example directory structure for the `Aureus` directory:
+Ensure that the `Aureus_Matcher` and `Aureus_Extractor` directories provided in this repository are placed within the main `Aureus` SDK directory. Here is an example directory structure for the `Aureus` directory:
 
 ```bash
 .
