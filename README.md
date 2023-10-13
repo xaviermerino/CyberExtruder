@@ -6,7 +6,7 @@ This repository contains code for utilizing the Aureus3D SDK by CyberExtruder fo
 
 >**Important Note:** This repository does not include proprietary Aureus code and requires you to have obtained both the SDK files and an Aureus license. Without these prerequisites, the code in this repository will not function correctly.
 
-Ensure that the `Aureus_Tracking` directory provided in this repository is placed within the main `Aureus` SDK directory. Here is an example directory structure for the `Aureus` directory:
+Ensure that the `Aureus_Matcher` and `Aureus_Extractor` directories provided in this repository is placed within the main `Aureus` SDK directory. Here is an example directory structure for the `Aureus` directory:
 
 ```bash
 .
@@ -17,12 +17,13 @@ Ensure that the `Aureus_Tracking` directory provided in this repository is place
 ├── AGSDK.data
 ├── algc_b03c304e3254.data
 ├── Aureus
-├── Aureus_Tracking
-├── Aureus_Tracking_exe
+├── Aureus_Extractor
+├── Aureus_Matcher
 ├── AureusVideoGUI
 ├── AureusVideoGUI_exe
 ├── cec.data
 ├── DwellTime.data
+├── extract
 ├── FNNS.data
 ├── FR
 ├── InstallGUIlibs.sh
@@ -35,6 +36,7 @@ Ensure that the `Aureus_Tracking` directory provided in this repository is place
 ├── libtbb.so
 ├── libtbb.so.2
 ├── lic.txt
+├── match
 ├── MOPC.data
 ├── POST
 ├── restart_app.sh
@@ -50,7 +52,7 @@ Ensure that the `Aureus_Tracking` directory provided in this repository is place
 ## 🛠️ Building the Image 
 > **Note:** If you would rather pull the image directly, visit this [page](https://github.com/xaviermerino/CyberExtruder-Private). It will take you to a private repository with instructions on how to pull the image, provided you have been granted prior access. Once pulled you may skip this section and keep following the guide.
 
-Assuming you have placed the `Aureus_Tracking` directory within the `Aureus` SDK directory as mentioned above, you can build the image using the provided `Dockerfile`. Navigate to the root of the repository and execute the following command:
+Assuming you have placed the `Aureus_Matcher` and `Aureus_Extractor` directories within the `Aureus` SDK directory as mentioned above, you can build the image using the provided `Dockerfile`. Navigate to the root of the repository and execute the following command:
 
 ```bash
 docker build -t cx:6.1.5 .
