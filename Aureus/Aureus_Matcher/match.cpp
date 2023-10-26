@@ -82,12 +82,26 @@ std::vector<std::string> generateCombinations(const std::vector<std::string> &pr
   return combinations;
 }
 
+std::string getStemFromFilePath(const std::string path) {
+  std::filesystem::path filePath(path);
+  std::string fileNameWithoutExtension = filePath.stem().string();
+  return fileNameWithoutExtension;
+}
+
 std::vector<std::string> generateCombinations(const std::vector<std::string>& probePaths, const std::vector<std::string>& galleryPaths) {
   std::vector<std::string> combinations;
   combinations.reserve(probePaths.size() * galleryPaths.size());
   for (int i = 0; i < probePaths.size(); ++i) {
+    std::string probeImage = getStemFromFilePath(probePaths[i]);
     for (int j = 0; j < galleryPaths.size(); ++j) {
-      combinations.push_back(probePaths[i] + "," + galleryPaths[j]);
+      std::string galleryImage = getStemFromFilePath(galleryPaths[j]);
+
+      // This portion makes sure that the same instance of a subject is removed.
+      // For example, if the gallery has a "ABC_123" and the probes have "ABC_123_cloaked"
+      // then it will not be considered
+      if (probeImage.find(galleryImage) == std::string::npos){ 
+        combinations.push_back(probePaths[i] + "," + galleryPaths[j]);
+      }
     }
   }
   return combinations;
@@ -113,12 +127,6 @@ std::vector<std::string> getFilesWithExtensions(const std::string& directoryPath
   }
 
   return matchingFiles;
-}
-
-std::string getStemFromFilePath(const std::string path) {
-  std::filesystem::path filePath(path);
-  std::string fileNameWithoutExtension = filePath.stem().string();
-  return fileNameWithoutExtension;
 }
 
 std::unordered_map<std::string, cx_byte*> readTemplates(std::vector<std::string> paths, int templateSize){

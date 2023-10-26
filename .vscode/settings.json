@@ -69,6 +69,8 @@
         "bitset": "cpp",
         "cstring": "cpp",
         "regex": "cpp",
-        "csignal": "cpp"
+        "csignal": "cpp",
+        "complex": "cpp",
+        "typeindex": "cpp"
     }
 }
