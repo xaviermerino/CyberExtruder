@@ -3,6 +3,9 @@ LABEL org.opencontainers.image.source=https://github.com/xaviermerino/CyberExtru
 LABEL org.opencontainers.image.description="CyberExtruder Feature Extractor and Matcher"
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV OPENBLAS_NUM_THREADS=1
+ENV GOTO_NUM_THREADS=1
+ENV OMP_NUM_THREADS=1
 
 COPY scripts/udevadm /bin/udevadm
 COPY cxxopts/include/cxxopts.hpp /usr/include/cxxopts.hpp
