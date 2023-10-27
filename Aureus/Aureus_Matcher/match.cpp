@@ -62,7 +62,7 @@ void signalHandler(int signal) {
 
 // Function to handle thread-specific signals (SIGSEGV and SIGABRT)
 void threadSignalHandler(int signal) {
-  quitThreads.store(true);
+  exitThreads.store(true);
   std::cout << "\nReceived signal: ";
   switch (signal) {
     case SIGSEGV:
@@ -237,11 +237,11 @@ void processCombination(
   }
   catch (const std::exception& e) {
     std::cout << "\nAn exception occurred in a thread:\n" << e.what() << std::endl;
-    quitThreads.store(true);
+    exitThreads.store(true);
   }
   catch (...) {
     std::cout << "\nAn unknown exception occurred in a thread" << std::endl;
-    quitThreads.store(true);
+    exitThreads.store(true);
   }
 }
 
