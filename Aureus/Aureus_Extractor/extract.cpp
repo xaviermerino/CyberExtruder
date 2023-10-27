@@ -28,22 +28,53 @@ std::mutex templateMutex;
 std::mutex failToEnrollMutex;
 std::vector<std::string> fte;
 
+// Atomic variable threads check to see if they need to exit
+std::atomic<bool> exitThreads(false);
+
 void freeAureus() {
-    char msg[1024];
-    if (!CX_FreeAureus(p_aureus, msg)) {
-        printf("Failed to free Aureus:\n%s\n", msg);
-    } else {
-        printf("[INFO] Successfully freed Aureus!\n");
-    }
+  char msg[1024];
+  if (!CX_FreeAureus(p_aureus, msg)) {
+      printf("Failed to free Aureus:\n%s\n", msg);
+  } else {
+      printf("[INFO] Successfully freed Aureus!\n");
+  }
 }
 
-// Function to be executed on SIGINT (Ctrl+C)
-void handleSigInt(int signal) {
-  std::cout << "\n[INFO] SIGINT received. Freeing Aureus." << std::endl;
-  freeAureus();
-  std::cout << "[INFO] Exiting the program." << std::endl;
-  exit(EXIT_SUCCESS); // Terminate the program
+// Function to be executed on SIGINT (Ctrl+C) or SIGTERM
+void signalHandler(int signal) {
+  exitThreads.store(true);    //If a signal is received, tell all running threads to exit
+
+  switch (signal) {
+    case SIGTERM:
+      std::cout << "\n[INFO] SIGTERM received. Freeing Aureus." << std::endl;
+      break;
+    case SIGINT:
+      std::cout << "\n[INFO] SIGINT received. Freeing Aureus." << std::endl;
+      break;
+  }
+
+  // We wait to call freeAureus() until all the threads have joined in main()
 }
+
+
+// Function to handle thread-specific signals (SIGSEGV and SIGABRT)
+void threadSignalHandler(int signal) {
+  quitThreads.store(true);
+  std::cout << "\nReceived signal: ";
+  switch (signal) {
+    case SIGSEGV:
+      std::cout << "SIGSEGV" << std::endl;
+      freeAureus();
+      exit(EXIT_FAILURE);
+      break;
+    case SIGABRT:
+      std::cout << "SIGABRT" << std::endl;
+      freeAureus();
+      exit(EXIT_FAILURE);
+      break; 
+  }
+}
+
 
 void Aureus_Init_CallBack(cx_real percent, const char* info, void* p_object){
   printf("%f%% %s\n", percent, info);
@@ -85,7 +116,7 @@ std::vector<std::string> getFilesWithExtensions(const std::string& directoryPath
       } 
     }
   } catch (const std::exception& e) {
-      std::cerr << "Error: " << e.what() << std::endl;
+    std::cerr << "Error: " << e.what() << std::endl;
   }
 
   return matchingFiles;
@@ -109,37 +140,63 @@ void generateTemplates(
   unsigned long start,
   unsigned long end) {
   
+  //Setup the SIGSEGV and SIGABRT thread signal handlers
+  if (signal(SIGSEGV, threadSignalHandler) == SIG_ERR) {
+    std::cerr << "Error setting up SIGSEGV signal handler." << std::endl;
+    return;
+  }
+  
+  if (signal(SIGABRT, threadSignalHandler) == SIG_ERR) {
+    std::cerr << "Error setting up SIGABRT signal handler." << std::endl;
+    return;
+  }
+
   int range = end - start;
 
-  for (unsigned long i = start; i < end; i++){
-    std::string filePath = paths[i];
-    std::filesystem::path templateFileName = templateDirectory / (getStemFromFilePath(filePath) + ".bin");
-    CX_RAM_Image image;
-    cx_byte* pTemplate = new cx_byte[templateSize];
-    if (LoadImageFromDisk(filePath.c_str(), image)){
-      int result = CX_GenerateTemplate(*p_aureus, &image, *fdp, pTemplate, msg);
-      if (result == 1){
-        std::ofstream file(templateFileName.c_str(), std::ios::out | std::ios::binary);
-        if (file.is_open()) {
+  try {
+    for (unsigned long i = start; i < end; i++){
+
+      if (exitThreads.load()) {
+        return;
+      }
+
+      std::string filePath = paths[i];
+      std::filesystem::path templateFileName = templateDirectory / (getStemFromFilePath(filePath) + ".bin");
+      CX_RAM_Image image;
+      cx_byte* pTemplate = new cx_byte[templateSize];
+      if (LoadImageFromDisk(filePath.c_str(), image)){
+        int result = CX_GenerateTemplate(*p_aureus, &image, *fdp, pTemplate, msg);
+        if (result == 1){
+          std::ofstream file(templateFileName.c_str(), std::ios::out | std::ios::binary);
+          if (file.is_open()) {
             file.write(reinterpret_cast<const char*>(pTemplate), templateSize);
             file.close();
-        } else {
+          } else {
             std::cerr << "[THREAD " << threadNumber << "] Could not open " << templateFileName << " for writing." << std::endl;
+          }
+        } else {
+          std::cout << "[THREAD " << threadNumber << "] FTE: " << filePath << std::endl;
+          std::lock_guard<std::mutex> lock(failToEnrollMutex);
+          fte.push_back(filePath);
         }
       } else {
-        std::cout << "[THREAD " << threadNumber << "] FTE: " << filePath << std::endl;
-        std::lock_guard<std::mutex> lock(failToEnrollMutex);
-        fte.push_back(filePath);
+        std::cerr << "[ERROR] Failed to Load: " << filePath << std::endl;
       }
-    } else {
-      std::cerr << "[ERROR] Failed to Load: " << filePath << std::endl;
-    }
-    CX_Free_RAM_Image(&image, msg);
+      CX_Free_RAM_Image(&image, msg);
 
-    int current = i - start + 1;
-    if (current % modulus == 0 || i == end - 1) {
-      std::cout << "[THREAD " << threadNumber << "] Progress: " << current << " / " << range << std::endl;
+      int current = i - start + 1;
+      if (current % modulus == 0 || i == end - 1) {
+        std::cout << "[THREAD " << threadNumber << "] Progress: " << current << " / " << range << std::endl;
+      }
     }
+  }
+  catch (const std::exception& e) {
+    std::cout << "\nAn exception occurred in a thread:\n" << e.what() << std::endl;
+    quitThreads.store(true);
+  }
+  catch (...) {
+    std::cout << "\nAn unknown exception occurred in a thread" << std::endl;
+    quitThreads.store(true);
   }
 }
 
@@ -155,14 +212,14 @@ int main(int argc, char* argv[]){
   auto result = options.parse(argc, argv);
 
   if (result.count("help")) {
-      std::cout << options.help() << std::endl;
-      return 0;
+    std::cout << options.help() << std::endl;
+    return 0;
   }
 
   if (!result.count("output") || !result.count("directory")) {
-      std::cerr << "Error: Missing required options." << std::endl;
-      std::cout << options.help() << std::endl;
-      return 1;
+    std::cerr << "Error: Missing required options." << std::endl;
+    std::cout << options.help() << std::endl;
+    return 1;
   }
 
   std::string gallery = result["directory"].as<std::string>();
@@ -172,29 +229,34 @@ int main(int argc, char* argv[]){
   int numThreads = result["threads"].as<int>();
 
   if (numThreads == -1) {
-      numThreads = std::thread::hardware_concurrency() / 2;
+    numThreads = std::thread::hardware_concurrency() / 2;
   }
 
   std::filesystem::path templatePath = directory / "templates";
   std::filesystem::path summaryPath = directory / "summary";
   if (!std::filesystem::exists(templatePath)) {
-      if (!std::filesystem::create_directory(templatePath)) {
-        std::cout << "[ERROR] Failed to create templates directory." << std::endl;
-        return -1;
-      }
+    if (!std::filesystem::create_directory(templatePath)) {
+      std::cout << "[ERROR] Failed to create templates directory." << std::endl;
+      return -1;
+    }
   }
   if (!std::filesystem::exists(summaryPath)) {
-      if (!std::filesystem::create_directory(summaryPath)) {
-        std::cout << "[ERROR] Failed to create summary directory." << std::endl;
-        return -1;
-      }
+    if (!std::filesystem::create_directory(summaryPath)) {
+      std::cout << "[ERROR] Failed to create summary directory." << std::endl;
+      return -1;
+    }
   }
   std::filesystem::path missingPath = summaryPath / missingFilename;
   std::filesystem::path completedPath = summaryPath / completedFilename;
 
-// Set up the SIGINT signal handler
-  if (signal(SIGINT, handleSigInt) == SIG_ERR) {
-    std::cerr << "Error setting up signal handler." << std::endl;
+  // Set up the SIGINT and SIGTERM signal handlers
+  if (signal(SIGINT, signalHandler) == SIG_ERR) {
+    std::cerr << "Error setting up SIGINT signal handler." << std::endl;
+    return 1;
+  }
+
+  if (signal(SIGTERM, signalHandler) == SIG_ERR) {
+    std::cerr << "Error setting up SIGTERM signal handler." << std::endl;
     return 1;
   }
   
@@ -339,7 +401,13 @@ int main(int argc, char* argv[]){
   for (auto& thread : templateThreads) {
     thread.join();
   }
-  
+
+  if (exitThreads.load()) {
+    freeAureus();
+    std::cout << "[INFO] Exiting the program." << std::endl;
+    exit(EXIT_SUCCESS); // Terminate the program
+  }
+
   std::cout << "[INFO] Template Generation Done!" << std::endl;
   if (fte.size() > 0){
     std::cout << "[INFO] Failed to enroll " << fte.size() << " images." << std::endl;
@@ -359,8 +427,8 @@ int main(int argc, char* argv[]){
   freeAureus();
   std::ofstream completedFile(completedPath.string());
   if (!completedFile.is_open()) {
-      std::cerr << "Error: Could not open output enrollment summary file." << std::endl;
-      return 1;
+    std::cerr << "Error: Could not open output enrollment summary file." << std::endl;
+    return 1;
   }
 
   std::cout << "[INFO] Writing enrollment summary to " << completedPath << std::endl;
