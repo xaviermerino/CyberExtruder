@@ -134,6 +134,7 @@ void generateTemplates(
     } else {
       std::cerr << "[ERROR] Failed to Load: " << filePath << std::endl;
     }
+    CX_Free_RAM_Image(&image, msg);
 
     int current = i - start + 1;
     if (current % modulus == 0 || i == end - 1) {
