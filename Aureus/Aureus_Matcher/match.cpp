@@ -27,6 +27,9 @@
 CX_AUREUS p_aureus;
 std::mutex matchingMutex;
 
+// Atomic variable threads check to see if they need to exit
+std::aromic<bool> exitThreads(false);
+
 void freeAureus() {
     char msg[1024];
     if (!CX_FreeAureus(p_aureus, msg)) {
@@ -36,14 +39,43 @@ void freeAureus() {
     }
 }
 
-// Function to be executed on SIGINT (Ctrl+C)
-void handleSigInt(int signal) {
-  std::cout << "\n[INFO] SIGINT received. Freeing Aureus." << std::endl;
-  // Set the shouldExit flag to indicate that the program should exit
-  // shouldExit.store(true);
-  freeAureus();
-  std::cout << "[INFO] Exiting the program." << std::endl;
-  exit(EXIT_SUCCESS); // Terminate the program
+// Function to be executed on SIGINT (Ctrl+C) or SIGTERM
+void signalHandler(int signal) {
+  exitThreads.store(true);    //If a signal is received, tell all running threads to exit
+
+  switch (signal) {
+    case SIGTERM:
+      std::cout << "\n[INFO] SIGTERM received. Freeing Aureus." << std::endl;
+      break;
+    case SIGINT:
+      std::cout << "\n[INFO] SIGINT received. Freeing Aureus." << std::endl;
+      break;
+  }
+
+  // We wait to call freeAureus() until all the threads have joined in main()
+
+  // freeAureus();
+  // std::cout << "[INFO] Exiting the program." << std::endl;
+  // exit(EXIT_SUCCESS); // Terminate the program
+}
+
+
+// Function to handle thread-specific signals (SIGSEGV and SIGABRT)
+void threadSignalHandler(int signal) {
+    quitThreads.store(true);
+    std::cout << "\nReceived signal: ";
+    switch (signal) {
+        case SIGSEGV:
+            std::cout << "SIGSEGV" << std::endl;
+            freeAureus();
+            exit(EXIT_FAILURE);
+            break;
+        case SIGABRT:
+            std::cout << "SIGABRT" << std::endl;
+            freeAureus();
+            exit(EXIT_FAILURE);
+            break; 
+    }
 }
 
 void Aureus_Init_CallBack(cx_real percent, const char* info, void* p_object){
@@ -158,32 +190,58 @@ void processCombination(
   unsigned long end,
   std::unordered_map<std::string, cx_byte*>* galleryData = nullptr) {
   
-  for (unsigned long i = start; i < end; i++) {
-    std::vector<std::string> parts = splitString(combinations[i], ',');
-    std::string file1 = getStemFromFilePath(parts[0]);
-    std::string file2 = getStemFromFilePath(parts[1]);
-    cx_byte* template1 = probeData[file1];
-    cx_byte* template2;
-    if (galleryData != nullptr){
-      template2 = (*galleryData)[file2];
-    } else {
-      template2 = probeData[file2];  
-    }
+  //Setup the SIGSEGV and SIGABRT thread signal handlers
+  if (signal(SIGSEGV, threadSignalHandler) == SIG_ERR) {
+      std::cerr << "Error setting up SIGSEGV signal handler." << std::endl;
+      return;
+  }
+  
+  if (signal(SIGABRT, threadSignalHandler) == SIG_ERR) {
+      std::cerr << "Error setting up SIGABRT signal handler." << std::endl;
+      return;
+  }
 
-    // Calculate the similarity
-    cx_real similarity = CX_MatchFRtemplates(*p_aureus, template1, templateSize, template2, templateSize, msg);
-    if (similarity == -1){
-      std::cout << "[THREAD " << threadNumber << " ERROR] Could not compare " << file1 << " and " << file2 << std::endl;
-    }
+  try {
+    for (unsigned long i = start; i < end; i++) {
 
-    std::lock_guard<std::mutex> lock(matchingMutex);
-    simMat[file1][file2] = similarity;
+      if (exitThreads.load()) {
+          return;
+      }
 
-    int current = i - start + 1;
-    if (current % modulus == 0 || i == end - 1) {
-      int range = end - start;
-      std::cout << "[THREAD " << threadNumber << "]: " << current << " / " << range << std::endl;
+      std::vector<std::string> parts = splitString(combinations[i], ',');
+      std::string file1 = getStemFromFilePath(parts[0]);
+      std::string file2 = getStemFromFilePath(parts[1]);
+      cx_byte* template1 = probeData[file1];
+      cx_byte* template2;
+      if (galleryData != nullptr){
+        template2 = (*galleryData)[file2];
+      } else {
+        template2 = probeData[file2];  
+      }
+
+      // Calculate the similarity
+      cx_real similarity = CX_MatchFRtemplates(*p_aureus, template1, templateSize, template2, templateSize, msg);
+      if (similarity == -1){
+        std::cout << "[THREAD " << threadNumber << " ERROR] Could not compare " << file1 << " and " << file2 << std::endl;
+      }
+
+      std::lock_guard<std::mutex> lock(matchingMutex);
+      simMat[file1][file2] = similarity;
+
+      int current = i - start + 1;
+      if (current % modulus == 0 || i == end - 1) {
+        int range = end - start;
+        std::cout << "[THREAD " << threadNumber << "]: " << current << " / " << range << std::endl;
+      }
     }
+  }
+  catch (const std::exception& e) {
+      std::cout << "\nAn exception occurred in a thread:\n" << e.what() << std::endl;
+      quitThreads.store(true);
+  }
+  catch (...) {
+      std::cout << "\nAn unknown exception occurred in a thread" << std::endl;
+      quitThreads.store(true);
   }
 }
 
@@ -243,9 +301,14 @@ int main(int argc, char* argv[]){
       numThreads = std::thread::hardware_concurrency() / 2;
   }
   
-// Set up the SIGINT signal handler
-  if (signal(SIGINT, handleSigInt) == SIG_ERR) {
-    std::cerr << "Error setting up signal handler." << std::endl;
+  // Set up the SIGINT and SIGTERM signal handlers
+  if (signal(SIGINT, signalHandler) == SIG_ERR) {
+    std::cerr << "Error setting up SIGINT signal handler." << std::endl;
+    return 1;
+  }
+
+  if (signal(SIGTERM, signalHandler) == SIG_ERR) {
+    std::cerr << "Error setting up SIGTERM signal handler." << std::endl;
     return 1;
   }
   
@@ -430,6 +493,11 @@ int main(int argc, char* argv[]){
   }
 
   freeAureus();
+
+  if (exitThreads.load()) {
+    std::cout << "[INFO] Exiting the program." << std::endl;
+    exit(EXIT_SUCCESS); // Terminate the program
+  }
 
   // Open a file for writing
   if (scoreType == "csv"){
