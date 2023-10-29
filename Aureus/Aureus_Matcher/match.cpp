@@ -26,8 +26,9 @@
 
 CX_AUREUS p_aureus;
 std::mutex matchingMutex;
-
-// Atomic variable threads check to see if they need to exit
+std::vector<std::string> galleryPaths;
+std::vector<std::string> probePaths;
+std::vector<cx_byte*> probeData, galleryData;
 std::atomic<bool> exitThreads(false);
 
 void freeAureus() {
@@ -102,13 +103,13 @@ std::vector<std::string> splitString(const std::string &input, char delimiter) {
   return parts;
 }
 
-std::vector<std::string> generateCombinations(const std::vector<std::string> &probePaths) {
-  std::vector<std::string> combinations;
+std::vector<std::pair<unsigned int, unsigned int>> generateCombinations(const std::vector<std::string> &probePaths) {
+  std::vector<std::pair<unsigned int, unsigned int>> combinations;
   long n = probePaths.size();
   combinations.reserve((n * (n-1)) / 2);
   for (int i = 0; i < n; ++i) {
     for (int j = i + 1; j < n; ++j) {
-      combinations.push_back(probePaths[i] + "," + probePaths[j]);
+      combinations.push_back(std::pair<unsigned int, unsigned int>(i, j));
     }
   }
   return combinations;
@@ -120,19 +121,19 @@ std::string getStemFromFilePath(const std::string path) {
   return fileNameWithoutExtension;
 }
 
-std::vector<std::string> generateCombinations(const std::vector<std::string>& probePaths, const std::vector<std::string>& galleryPaths) {
-  std::vector<std::string> combinations;
+std::vector<std::pair<unsigned int, unsigned int>> generateCombinations(const std::vector<std::string>& probePaths, const std::vector<std::string>& galleryPaths) {
+  std::vector<std::pair<unsigned int, unsigned int>> combinations;
   combinations.reserve(probePaths.size() * galleryPaths.size());
-  for (int i = 0; i < probePaths.size(); ++i) {
+  for (unsigned int i = 0; i < probePaths.size(); ++i) {
     std::string probeImage = getStemFromFilePath(probePaths[i]);
-    for (int j = 0; j < galleryPaths.size(); ++j) {
+    for (unsigned int j = 0; j < galleryPaths.size(); ++j) {
       std::string galleryImage = getStemFromFilePath(galleryPaths[j]);
 
       // This portion makes sure that the same instance of a subject is removed.
       // For example, if the gallery has a "ABC_123" and the probes have "ABC_123_cloaked"
       // then it will not be considered
       if (probeImage.find(galleryImage) == std::string::npos){ 
-        combinations.push_back(probePaths[i] + "," + galleryPaths[j]);
+        combinations.push_back(std::pair<unsigned int, unsigned int>(i, j));
       }
     }
   }
@@ -161,8 +162,9 @@ std::vector<std::string> getFilesWithExtensions(const std::string& directoryPath
   return matchingFiles;
 }
 
-std::unordered_map<std::string, cx_byte*> readTemplates(std::vector<std::string> paths, int templateSize){
-  std::unordered_map<std::string, cx_byte*> data;
+std::vector<cx_byte*> readTemplates(std::vector<std::string> paths, int templateSize){
+  // std::unordered_map<std::string, cx_byte*> data;
+  std::vector<cx_byte*> data;
   data.reserve(paths.size());
   for (const std::string& path : paths){
     std::ifstream file(path.c_str(), std::ios::in | std::ios::binary);
@@ -170,7 +172,7 @@ std::unordered_map<std::string, cx_byte*> readTemplates(std::vector<std::string>
       cx_byte* pTemplate = new cx_byte[templateSize];
       file.read(reinterpret_cast<char*>(pTemplate), templateSize);
       file.close();
-      data[getStemFromFilePath(path)] = pTemplate;
+      data.push_back(pTemplate);
     }
   }
   return data;
@@ -178,9 +180,8 @@ std::unordered_map<std::string, cx_byte*> readTemplates(std::vector<std::string>
 
 void processCombination(
   int threadNumber,
-  std::vector<std::string>& combinations,
-  std::unordered_map<std::string, cx_byte*>& probeData,
-  std::unordered_map<std::string, std::unordered_map<std::string, float>>& simMat,
+  std::vector<std::pair<unsigned int, unsigned int>>& combinations,
+  std::unordered_map<unsigned int, std::unordered_map<unsigned int, float>>& simMat,
   CX_AUREUS* p_aureus,
   CX_DetectionParams* fdp,
   int templateSize,
@@ -188,7 +189,7 @@ void processCombination(
   int modulus,
   unsigned long start,
   unsigned long end,
-  std::unordered_map<std::string, cx_byte*>* galleryData = nullptr) {
+  std::vector<cx_byte*>* galleryData = nullptr) {
   
   //Setup the SIGSEGV and SIGABRT thread signal handlers
   if (signal(SIGSEGV, threadSignalHandler) == SIG_ERR) {
@@ -208,25 +209,32 @@ void processCombination(
           return;
       }
 
-      std::vector<std::string> parts = splitString(combinations[i], ',');
-      std::string file1 = getStemFromFilePath(parts[0]);
-      std::string file2 = getStemFromFilePath(parts[1]);
-      cx_byte* template1 = probeData[file1];
+      unsigned int firstIndex = combinations[i].first;
+      unsigned int secondIndex = combinations[i].second;
+      cx_byte* template1 = probeData[firstIndex];
       cx_byte* template2;
+      
       if (galleryData != nullptr){
-        template2 = (*galleryData)[file2];
+        template2 = (*galleryData)[secondIndex];
       } else {
-        template2 = probeData[file2];  
+        template2 = probeData[secondIndex];
       }
 
       // Calculate the similarity
       cx_real similarity = CX_MatchFRtemplates(*p_aureus, template1, templateSize, template2, templateSize, msg);
       if (similarity == -1){
+        std::string file1 = getStemFromFilePath(probePaths[firstIndex]);
+        std::string file2;
+        if (galleryData != nullptr){
+          file2 = getStemFromFilePath(galleryPaths[secondIndex]);
+        } else {
+          file2 = getStemFromFilePath(probePaths[secondIndex]);
+        }
         std::cout << "[THREAD " << threadNumber << " ERROR] Could not compare " << file1 << " and " << file2 << std::endl;
+      } else {
+        std::lock_guard<std::mutex> lock(matchingMutex);
+        simMat[firstIndex][secondIndex] = similarity;
       }
-
-      std::lock_guard<std::mutex> lock(matchingMutex);
-      simMat[file1][file2] = similarity;
 
       int current = i - start + 1;
       if (current % modulus == 0 || i == end - 1) {
@@ -423,8 +431,7 @@ int main(int argc, char* argv[]){
   fdp.m_max_height_prop = 0.8;
 
   const std::vector<std::string> fileExtensions = {".bin"};
-  std::vector<std::string> galleryPaths;
-  std::vector<std::string> probePaths = getFilesWithExtensions(probeDirectory, fileExtensions);
+  probePaths = getFilesWithExtensions(probeDirectory, fileExtensions);
   
   std::cout << "[INFO] Probe: " << probeDirectory << std::endl;
   std::cout << "[INFO] Gallery: " << galleryDirectory << std::endl;
@@ -443,19 +450,22 @@ int main(int argc, char* argv[]){
     return 0;
   }
 
-  std::unordered_map<std::string, cx_byte*> probeData, galleryData;
-  std::unordered_map<std::string, cx_byte*>* pGalleryData;
-  std::vector<std::string> combinations;
-  std::unordered_map<std::string, std::unordered_map<std::string, float>> simMat;
+  std::vector<cx_byte*>* pGalleryData;
+  std::vector<std::pair<unsigned int, unsigned int>> combinations;
+  std::unordered_map<unsigned int, std::unordered_map<unsigned int, float>> simMat;
 
+  std::cout << "[INFO]: Reading probe templates." << std::endl;
   probeData = readTemplates(probePaths, templateSize);
   if (probeDirectory != galleryDirectory){
+    std::cout << "[INFO]: Reading gallery templates." << std::endl;
     galleryData = readTemplates(galleryPaths, templateSize);
     pGalleryData = &galleryData;
+    std::cout << "[INFO]: Generating comparison pairs." << std::endl;
     combinations = generateCombinations(probePaths, galleryPaths);
   } else {
     galleryData = probeData;
     pGalleryData = nullptr;
+    std::cout << "[INFO]: Generating comparison pairs." << std::endl;
     combinations = generateCombinations(probePaths);
   }
 
@@ -474,7 +484,6 @@ int main(int argc, char* argv[]){
     auto threadFunc = std::bind(processCombination, 
       (i+1), 
       std::ref(combinations), 
-      std::ref(probeData), 
       std::ref(simMat), 
       &p_aureus, 
       &fdp, 
@@ -520,10 +529,18 @@ int main(int argc, char* argv[]){
 
     // Writing to impostor and authentic files
     for (const auto& entry1 : simMat) {
-      const std::string& file1 = entry1.first;
+      const unsigned int firstIndex = entry1.first;
+      std::string file1 = getStemFromFilePath(probePaths[firstIndex]);
       std::string subject1 = splitString(file1, '_')[0];
       for (const auto& entry2 : entry1.second) {
-        const std::string& file2 = entry2.first;
+        const unsigned int secondIndex = entry2.first;
+        std::string file2;
+        if (pGalleryData != nullptr){
+          file2 = galleryPaths[secondIndex];
+        } else {
+          file2 = probePaths[secondIndex];
+        }
+        file2 = getStemFromFilePath(file2);
         std::string subject2 = splitString(file2, '_')[0];
         float similarity = entry2.second;
         if (subject1 == subject2){
@@ -561,10 +578,18 @@ int main(int argc, char* argv[]){
     // Writing to impostor and authentic files
     std::vector<float> authenticScores, impostorScores;
     for (const auto& entry1 : simMat) {
-      const std::string& file1 = entry1.first;
+      const unsigned int firstIndex = entry1.first;
+      std::string file1 = getStemFromFilePath(probePaths[firstIndex]);
       std::string subject1 = splitString(file1, '_')[0];
       for (const auto& entry2 : entry1.second) {
-        const std::string& file2 = entry2.first;
+        const unsigned int secondIndex = entry2.first;
+        std::string file2;
+        if (pGalleryData != nullptr){
+          file2 = galleryPaths[secondIndex];
+        } else {
+          file2 = probePaths[secondIndex];
+        }
+        file2 = getStemFromFilePath(file2);
         std::string subject2 = splitString(file2, '_')[0];
         float similarity = entry2.second;
         if (subject1 == subject2){
