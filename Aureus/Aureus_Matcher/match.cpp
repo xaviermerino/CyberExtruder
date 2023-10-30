@@ -22,6 +22,9 @@
 #include <cxxopts.hpp>
 #include <csignal>
 #include <cstdlib>
+#include <algorithm>
+#include <execution>
+#include <random>
 #include "npy.hpp"
 
 CX_AUREUS p_aureus;
@@ -29,7 +32,10 @@ std::mutex matchingMutex;
 std::vector<std::string> galleryPaths;
 std::vector<std::string> probePaths;
 std::vector<cx_byte*> probeData, galleryData;
-std::atomic<bool> exitThreads(false);
+std::atomic<bool> stopRequested(false);
+std::atomic<size_t> activeThreads(0); 
+int templateSize;
+std::unordered_map<unsigned int, std::unordered_map<unsigned int, float>> simMat;
 
 void freeAureus() {
   char msg[1024];
@@ -40,43 +46,23 @@ void freeAureus() {
   }
 }
 
-// Function to be executed on SIGINT (Ctrl+C) or SIGTERM
-void signalHandler(int signal) {
-  exitThreads.store(true);    //If a signal is received, tell all running threads to exit
-
-  switch (signal) {
-    case SIGTERM:
-      std::cout << "\n[INFO] SIGTERM received. Freeing Aureus." << std::endl;
-      break;
-    case SIGINT:
-      std::cout << "\n[INFO] SIGINT received. Freeing Aureus." << std::endl;
-      break;
+void cleanupAndExit(int signum) {
+  stopRequested.store(true); // Request stopping of threads
+  auto startTime = std::chrono::system_clock::now();
+  while (activeThreads.load() > 0 && 
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - startTime).count() < 5) 
+  { 
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
-
-  // We wait to call freeAureus() until all the threads have joined in main()
-
-  // freeAureus();
-  // std::cout << "[INFO] Exiting the program." << std::endl;
-  // exit(EXIT_SUCCESS); // Terminate the program
+  freeAureus();
+  
+  exit(signum);
 }
 
-
-// Function to handle thread-specific signals (SIGSEGV and SIGABRT)
-void threadSignalHandler(int signal) {
-  exitThreads.store(true);
-  std::cout << "\nReceived signal: ";
-  switch (signal) {
-    case SIGSEGV:
-      std::cout << "SIGSEGV" << std::endl;
-      freeAureus();
-      exit(EXIT_FAILURE);
-      break;
-    case SIGABRT:
-      std::cout << "SIGABRT" << std::endl;
-      freeAureus();
-      exit(EXIT_FAILURE);
-      break; 
-  }
+void setupSignalHandlers() {
+  signal(SIGINT, cleanupAndExit);
+  signal(SIGTERM, cleanupAndExit);
+  signal(SIGSEGV, cleanupAndExit);  
 }
 
 void Aureus_Init_CallBack(cx_real percent, const char* info, void* p_object){
@@ -162,95 +148,124 @@ std::vector<std::string> getFilesWithExtensions(const std::string& directoryPath
   return matchingFiles;
 }
 
-std::vector<cx_byte*> readTemplates(std::vector<std::string> paths, int templateSize){
-  // std::unordered_map<std::string, cx_byte*> data;
-  std::vector<cx_byte*> data;
-  data.reserve(paths.size());
-  for (const std::string& path : paths){
-    std::ifstream file(path.c_str(), std::ios::in | std::ios::binary);
-    if (file.is_open()){
-      cx_byte* pTemplate = new cx_byte[templateSize];
-      file.read(reinterpret_cast<char*>(pTemplate), templateSize);
-      file.close();
-      data.push_back(pTemplate);
-    }
-  }
+std::vector<cx_byte*> readTemplates(const std::vector<std::string>& paths, int templateSize) {
+  std::vector<cx_byte*> data(paths.size()); // Preallocate with the size of paths
+  std::for_each(std::execution::par, paths.begin(), paths.end(), [&](const std::string& path) {
+      std::ifstream file(path.c_str(), std::ios::in | std::ios::binary);
+      if (file.is_open()) {
+          cx_byte* pTemplate = new cx_byte[templateSize];
+          file.read(reinterpret_cast<char*>(pTemplate), templateSize);
+          file.close();
+          
+          // Calculate the index for insertion
+          size_t index = &path - &paths[0];
+          data[index] = pTemplate;
+      }
+  });
   return data;
 }
 
-void processCombination(
-  int threadNumber,
-  std::vector<std::pair<unsigned int, unsigned int>>& combinations,
-  std::unordered_map<unsigned int, std::unordered_map<unsigned int, float>>& simMat,
-  CX_AUREUS* p_aureus,
-  CX_DetectionParams* fdp,
-  int templateSize,
-  char* msg,
-  int modulus,
-  unsigned long start,
-  unsigned long end,
-  std::vector<cx_byte*>* galleryData = nullptr) {
-  
-  //Setup the SIGSEGV and SIGABRT thread signal handlers
-  if (signal(SIGSEGV, threadSignalHandler) == SIG_ERR) {
-    std::cerr << "Error setting up SIGSEGV signal handler." << std::endl;
-    return;
-  }
-  
-  if (signal(SIGABRT, threadSignalHandler) == SIG_ERR) {
-    std::cerr << "Error setting up SIGABRT signal handler." << std::endl;
-    return;
-  }
+void processProbeGalleryMatch(){
+  char msg[1024];
+  std::cout << "[INFO]: Matching probe and gallery templates." << std::endl;
+  std::atomic<size_t> atomicIndex(0);
+  std::atomic<size_t> completedTasks(0);
+  std::atomic<bool> isProcessingDone(false);  
 
-  try {
-    for (unsigned long i = start; i < end; i++) {
+  auto reportProgress = [&]() {
+    while (!isProcessingDone.load() && !stopRequested.load()) {
+      size_t currentCompleted = completedTasks.load();
+      double percentage = static_cast<double>(currentCompleted) / probePaths.size() * 100;
+      std::cout << "\rProgress: " << percentage << "% completed.";
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      std::cout << std::flush;
+    }
+    if (!stopRequested.load()){
+      std::cout << "\rProgress: " << 100 << "% completed.";
+      std::cout << std::flush;
+    }
+  };
 
-      if (exitThreads.load()) {
-          return;
+  std::thread progressReporter(reportProgress);
+
+  std::for_each(std::execution::par, probePaths.begin(), probePaths.end(), [&](const std::string& probePath) {
+    activeThreads.fetch_add(1);
+
+    size_t i = atomicIndex.fetch_add(1);
+    const std::string& probeImage = getStemFromFilePath(probePaths[i]);
+    for (size_t j = 0; j < galleryPaths.size(); ++j) {
+      if (stopRequested.load()) {
+        return; 
       }
 
-      unsigned int firstIndex = combinations[i].first;
-      unsigned int secondIndex = combinations[i].second;
-      cx_byte* template1 = probeData[firstIndex];
-      cx_byte* template2;
-      
-      if (galleryData != nullptr){
-        template2 = (*galleryData)[secondIndex];
-      } else {
-        template2 = probeData[secondIndex];
-      }
-
-      // Calculate the similarity
-      cx_real similarity = CX_MatchFRtemplates(*p_aureus, template1, templateSize, template2, templateSize, msg);
-      if (similarity == -1){
-        std::string file1 = getStemFromFilePath(probePaths[firstIndex]);
-        std::string file2;
-        if (galleryData != nullptr){
-          file2 = getStemFromFilePath(galleryPaths[secondIndex]);
-        } else {
-          file2 = getStemFromFilePath(probePaths[secondIndex]);
+      const std::string& galleryImage = getStemFromFilePath(galleryPaths[j]);
+      if (probeImage.find(galleryImage) == std::string::npos) {
+        cx_byte* template1 = probeData[i];
+        cx_byte* template2 = galleryData[j];
+        cx_real similarity = CX_MatchFRtemplates(p_aureus, template1, templateSize, template2, templateSize, msg);
+        if (similarity != -1){
+          std::lock_guard<std::mutex> lock(matchingMutex);
+          simMat[i][j] = similarity;
         }
-        std::cout << "[THREAD " << threadNumber << " ERROR] Could not compare " << file1 << " and " << file2 << std::endl;
-      } else {
-        std::lock_guard<std::mutex> lock(matchingMutex);
-        simMat[firstIndex][secondIndex] = similarity;
-      }
-
-      int current = i - start + 1;
-      if (current % modulus == 0 || i == end - 1) {
-        int range = end - start;
-        std::cout << "[THREAD " << threadNumber << "]: " << current << " / " << range << std::endl;
       }
     }
-  }
-  catch (const std::exception& e) {
-    std::cout << "\nAn exception occurred in a thread:\n" << e.what() << std::endl;
-    exitThreads.store(true);
-  }
-  catch (...) {
-    std::cout << "\nAn unknown exception occurred in a thread" << std::endl;
-    exitThreads.store(true);
-  }
+    completedTasks.fetch_add(1);
+    activeThreads.fetch_sub(1);
+  });
+
+  isProcessingDone.store(true);
+  progressReporter.join();
+  std::cout << "\n[INFO]: Matching completed." << std::endl;
+}
+
+void processProbeOnlyMatch(){
+  char msg[1024];
+  std::cout << "[INFO]: Matching probe templates." << std::endl;
+  std::atomic<size_t> atomicIndex(0);
+  std::atomic<size_t> completedTasks(0);
+  std::atomic<bool> isProcessingDone(false);  
+
+  auto reportProgress = [&]() {
+    while (!isProcessingDone.load() && !stopRequested.load()) {
+      size_t currentCompleted = completedTasks.load();
+      double percentage = static_cast<double>(currentCompleted) / probePaths.size() * 100;
+      std::cout << "\rProgress: " << percentage << "% completed.";
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      std::cout << std::flush;
+    }
+    if (!stopRequested.load()){
+      std::cout << "\rProgress: " << 100 << "% completed.";
+      std::cout << std::flush;
+    }
+  };
+
+  std::thread progressReporter(reportProgress);
+
+  std::for_each(std::execution::par, probePaths.begin(), probePaths.end(), [&](const std::string& probePath) {
+    size_t i = atomicIndex.fetch_add(1);
+    const std::string& probeImage = getStemFromFilePath(probePaths[i]);
+    for (size_t j = i + 1; j < probePaths.size(); ++j){
+      if (stopRequested.load()) {
+        return; 
+      }
+
+      cx_byte* template1 = probeData[i];
+      cx_byte* template2 = probeData[j];
+      cx_real similarity = CX_MatchFRtemplates(p_aureus, template1, templateSize, template2, templateSize, msg);
+
+      if (similarity != -1){
+        std::lock_guard<std::mutex> lock(matchingMutex);
+        simMat[i][j] = similarity;
+      }
+
+    }
+    completedTasks.fetch_add(1);
+    activeThreads.fetch_sub(1);
+  });
+
+  isProcessingDone.store(true);
+  progressReporter.join();
+  std::cout << "\n[INFO]: Matching completed." << std::endl;
 }
 
 int main(int argc, char* argv[]){
@@ -263,7 +278,7 @@ int main(int argc, char* argv[]){
     ("o,output_dir", "path to the output directory", cxxopts::value<std::string>())
     ("score_file_type", "save as csv or npy (default: csv)", cxxopts::value<std::string>()->default_value("csv"))
     // ("matrix_file_type", "save as csv or npy (default: none)", cxxopts::value<std::string>()->default_value("none"))
-    ("t,threads", "number of threads", cxxopts::value<int>()->default_value("-1")) // Default to -1 for auto
+    // ("t,threads", "number of threads", cxxopts::value<int>()->default_value("-1")) // Default to -1 for auto
     ("h,help", "Print help");
 
   auto result = options.parse(argc, argv);
@@ -293,33 +308,9 @@ int main(int argc, char* argv[]){
   if (result.count("gallery_dir")){
     galleryDirectory = result["gallery_dir"].as<std::string>();
   }
-
-  // std::string matrixType = result["matrix_file_type"].as<std::string>();
-  // if (matrixType != "csv" && matrixType != "bin" && matrixType != "none"){
-  //   std::cerr << "[ERROR] Matrix File Type can only be csv or bin." << std::endl;
-  //   std::cout << options.help() << std::endl;
-  //   return 1;
-  // }
-
   
-  int numThreads = result["threads"].as<int>();
+  setupSignalHandlers();
 
-  // If numThreads is set to -1, use std::thread::hardware_concurrency() / 2
-  if (numThreads == -1) {
-    numThreads = std::thread::hardware_concurrency() / 2;
-  }
-  
-  // Set up the SIGINT and SIGTERM signal handlers
-  if (signal(SIGINT, signalHandler) == SIG_ERR) {
-    std::cerr << "Error setting up SIGINT signal handler." << std::endl;
-    return 1;
-  }
-
-  if (signal(SIGTERM, signalHandler) == SIG_ERR) {
-    std::cerr << "Error setting up SIGTERM signal handler." << std::endl;
-    return 1;
-  }
-  
   char msg[1024];
   int load_gallery = 0; 
   bool load_FR_engines = true;
@@ -341,7 +332,6 @@ int main(int argc, char* argv[]){
   // Setting Application Name
   strcpy(msg, "Aureus Xavi");
   CX_SetAppInfo(p_aureus, msg);
-  // CX_SetInitializationCallBack(p_aureus, Aureus_Init_CallBack, NULL, msg);
 
   if (!CX_GetVersion(p_aureus, msg)) printf("Failed to get Aureus Version:\n%s\n", msg);
   else printf("Aureus Version = %s\n", msg);
@@ -349,7 +339,6 @@ int main(int argc, char* argv[]){
   string g_install_dir;
   GetExecutablePath(g_install_dir);
 
-  // Looking for that file that needs to be there
   string fname = g_install_dir + "/ADL_HNN.data";
   if (!FileExists(fname.c_str())){
     g_install_dir = "./";
@@ -382,7 +371,6 @@ int main(int argc, char* argv[]){
       if (n_engines < 0){
         printf("%s\n", msg);
         freeAureus();
-        // CX_FreeAureus(p_aureus, msg);
         return 0;
       } else {
         printf("There are %d FR engines\n", n_engines);
@@ -406,13 +394,8 @@ int main(int argc, char* argv[]){
         }
       }
 
-      // if we are using FR with a gallery make sure it's up to date
-      // only reason it would be out of date (apart from corruption) is
-      // if we have added a new engine
       if (use_fr){
-        // register an FR update callback (will print info during update)
         CX_SetUpdateFRCallBack(p_aureus, FRupdateCallback, NULL, msg);
-        // update the FR (this just makes sure all templates are present)
         CX_UpdateFR(p_aureus, msg);
         printf("\n"); 
       }
@@ -444,7 +427,8 @@ int main(int argc, char* argv[]){
   std::cout << "[INFO]: Found " << probePaths.size() << " images in the probe directory." << std::endl;
   std::cout << "[INFO]: Found " << galleryPaths.size() << " images in the gallery directory." << std::endl;
 
-  int templateSize = CX_GetTemplateSize(p_aureus, msg);
+  templateSize = CX_GetTemplateSize(p_aureus, msg);
+  // templateSize = 128;
   if (templateSize == -1){
     freeAureus();
     return 0;
@@ -452,7 +436,6 @@ int main(int argc, char* argv[]){
 
   std::vector<cx_byte*>* pGalleryData;
   std::vector<std::pair<unsigned int, unsigned int>> combinations;
-  std::unordered_map<unsigned int, std::unordered_map<unsigned int, float>> simMat;
 
   std::cout << "[INFO]: Reading probe templates." << std::endl;
   probeData = readTemplates(probePaths, templateSize);
@@ -460,53 +443,14 @@ int main(int argc, char* argv[]){
     std::cout << "[INFO]: Reading gallery templates." << std::endl;
     galleryData = readTemplates(galleryPaths, templateSize);
     pGalleryData = &galleryData;
-    std::cout << "[INFO]: Generating comparison pairs." << std::endl;
-    combinations = generateCombinations(probePaths, galleryPaths);
+    processProbeGalleryMatch();
   } else {
     galleryData = probeData;
     pGalleryData = nullptr;
-    std::cout << "[INFO]: Generating comparison pairs." << std::endl;
-    combinations = generateCombinations(probePaths);
-  }
-
-  std::vector<std::thread> matchingThreads;
-  matchingThreads.reserve(numThreads);
-
-  int batchSize = std::ceil(static_cast<double>(combinations.size()) / numThreads);
-  int modulus = int(batchSize * 0.1);
-  if (modulus < 2) modulus = 1;
-
-  std::cout << "\n[INFO] Threads: " << numThreads << " | Matching Batch Size: " << batchSize << std::endl;
-
-  for (int i = 0; i < numThreads; i++) {
-    unsigned long start = i * batchSize;
-    unsigned long end = (i == numThreads - 1) ? combinations.size() : (i + 1) * batchSize;
-    auto threadFunc = std::bind(processCombination, 
-      (i+1), 
-      std::ref(combinations), 
-      std::ref(simMat), 
-      &p_aureus, 
-      &fdp, 
-      templateSize, 
-      msg, 
-      modulus, 
-      start, 
-      end, 
-      pGalleryData);
-    matchingThreads.emplace_back(threadFunc);
-  }
-
-  // Wait for all threads to finish
-  for (auto& thread : matchingThreads) {
-    thread.join();
+    processProbeOnlyMatch();
   }
 
   freeAureus();
-
-  if (exitThreads.load()) {
-    std::cout << "[INFO] Exiting the program." << std::endl;
-    exit(EXIT_SUCCESS); // Terminate the program
-  }
 
   // Open a file for writing
   if (scoreType == "csv"){
