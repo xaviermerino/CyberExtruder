@@ -170,7 +170,7 @@ void processProbeGalleryMatch(){
   std::cout << "[INFO]: Matching probe and gallery templates." << std::endl;
   std::atomic<size_t> atomicIndex(0);
   std::atomic<size_t> completedTasks(0);
-  std::atomic<bool> isProcessingDone(false);  
+  std::atomic<bool> isProcessingDone(false);
 
   auto reportProgress = [&]() {
     while (!isProcessingDone.load() && !stopRequested.load()) {
@@ -192,7 +192,7 @@ void processProbeGalleryMatch(){
     activeThreads.fetch_add(1);
 
     size_t i = atomicIndex.fetch_add(1);
-    const std::string& probeImage = getStemFromFilePath(probePaths[i]);
+    const std::string& probeImage = getStemFromFilePath(probePath);
     for (size_t j = 0; j < galleryPaths.size(); ++j) {
       if (stopRequested.load()) {
         return; 
