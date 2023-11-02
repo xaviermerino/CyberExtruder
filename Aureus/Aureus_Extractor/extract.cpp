@@ -22,14 +22,24 @@
 #include <cxxopts.hpp>
 #include <csignal>
 #include <cstdlib>
+#include <algorithm>
+#include <execution>
+#include <random>
+#include <array>
+
+
+#define NUM_BATCHES 64
 
 CX_AUREUS p_aureus;
 std::mutex templateMutex;
 std::mutex failToEnrollMutex;
+std::vector<std::string> paths;
 std::vector<std::string> fte;
 
 // Atomic variable threads check to see if they need to exit
-std::atomic<bool> exitThreads(false);
+std::atomic<bool> stopRequested(false);
+std::atomic<size_t> activeThreads(0); 
+std::unordered_map<unsigned int, std::unordered_map<unsigned int, float>> simMat;
 
 void freeAureus() {
   char msg[1024];
@@ -40,26 +50,29 @@ void freeAureus() {
   }
 }
 
-// Function to be executed on SIGINT (Ctrl+C) or SIGTERM
-void signalHandler(int signal) {
-  exitThreads.store(true);    //If a signal is received, tell all running threads to exit
 
-  switch (signal) {
-    case SIGTERM:
-      std::cout << "\n[INFO] SIGTERM received. Freeing Aureus." << std::endl;
-      break;
-    case SIGINT:
-      std::cout << "\n[INFO] SIGINT received. Freeing Aureus." << std::endl;
-      break;
+void cleanupAndExit(int signum) {
+  stopRequested.store(true); // Request stopping of threads
+  auto startTime = std::chrono::system_clock::now();
+  while (activeThreads.load() > 0 && 
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - startTime).count() < 5) 
+  { 
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
-
-  // We wait to call freeAureus() until all the threads have joined in main()
+  freeAureus();
+  
+  exit(signum);
 }
 
+void setupSignalHandlers() {
+  signal(SIGINT, cleanupAndExit);
+  signal(SIGTERM, cleanupAndExit);
+  signal(SIGSEGV, cleanupAndExit);  
+}
 
 // Function to handle thread-specific signals (SIGSEGV and SIGABRT)
 void threadSignalHandler(int signal) {
-  exitThreads.store(true);
+  stopRequested.store(true);
   std::cout << "\nReceived signal: ";
   switch (signal) {
     case SIGSEGV:
@@ -129,34 +142,53 @@ std::string getStemFromFilePath(const std::string path) {
 }
 
 void generateTemplates(
-  int threadNumber,
-  const std::vector<std::string>& paths,
   const std::filesystem::path& templateDirectory,
   CX_AUREUS* p_aureus,
   CX_DetectionParams* fdp,
-  int templateSize,
-  char* msg,
-  int modulus,
-  unsigned long start,
-  unsigned long end) {
+  int templateSize) {
   
-  //Setup the SIGSEGV and SIGABRT thread signal handlers
-  if (signal(SIGSEGV, threadSignalHandler) == SIG_ERR) {
-    std::cerr << "Error setting up SIGSEGV signal handler." << std::endl;
-    return;
+  char msg[1024];
+  std::cout << "[INFO]: Generating templates.\n";
+  std::atomic<size_t> atomicIndex(0);
+  std::atomic<size_t> completedTasks(0);
+  std::atomic<bool> isGeneratingDone(false);
+
+  auto reportProgress = [&]() {
+    while (!isGeneratingDone.load() && !stopRequested.load()) {
+      size_t currentCompleted = completedTasks.load();
+      double percentage = static_cast<double>(currentCompleted) / paths.size() * 100;
+      std::cout << "\rProgress: " << percentage << "% completed.";
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      std::cout << std::flush;
+    }
+    if (!stopRequested.load()){
+      std::cout << "\rProgress: " << 100 << "% completed.";
+      std::cout << std::flush;
+    }
+  };
+
+  std::thread progressReporter(reportProgress);
+
+  std::vector <std::array<unsigned long, 2>> batchEndpoints;
+  batchEndpoints.reserve(NUM_BATCHES);
+  int numFiles = paths.size();
+  unsigned long batchSize = std::ceil(static_cast<double>(numFiles) / NUM_BATCHES);
+
+  for (int i = 0; i < NUM_BATCHES; i++) {
+    std::array<unsigned long, 2> endpoints;
+    unsigned long start = i * batchSize;
+    unsigned long end = (i == NUM_BATCHES - 1) ? numFiles : (i + 1) * batchSize;
+    endpoints[0] = start;
+    endpoints[1] = end;
+    batchEndpoints.push_back(endpoints);
   }
-  
-  if (signal(SIGABRT, threadSignalHandler) == SIG_ERR) {
-    std::cerr << "Error setting up SIGABRT signal handler." << std::endl;
-    return;
-  }
 
-  int range = end - start;
+  std::for_each(std::execution::par, batchEndpoints.begin(), batchEndpoints.end(), [&](const std::array<unsigned long, 2>& endpoints){
+    activeThreads.fetch_add(1);
 
-  try {
-    for (unsigned long i = start; i < end; i++){
-
-      if (exitThreads.load()) {
+    size_t i = atomicIndex.fetch_add(1);
+    for (int i = endpoints[0]; i < endpoints[1]; i++) {
+      if (stopRequested.load()) {
         return;
       }
 
@@ -172,10 +204,10 @@ void generateTemplates(
             file.write(reinterpret_cast<const char*>(pTemplate), templateSize);
             file.close();
           } else {
-            std::cerr << "[THREAD " << threadNumber << "] Could not open " << templateFileName << " for writing." << std::endl;
+            std::cerr << "Could not open " << templateFileName << " for writing." << std::endl;
           }
         } else {
-          std::cout << "[THREAD " << threadNumber << "] FTE: " << filePath << std::endl;
+          std::cout << "FTE: " << filePath << std::endl;
           std::lock_guard<std::mutex> lock(failToEnrollMutex);
           fte.push_back(filePath);
         }
@@ -183,22 +215,16 @@ void generateTemplates(
         std::cerr << "[ERROR] Failed to Load: " << filePath << std::endl;
       }
       CX_Free_RAM_Image(&image, msg);
-
-      int current = i - start + 1;
-      if (current % modulus == 0 || i == end - 1) {
-        std::cout << "[THREAD " << threadNumber << "] Progress: " << current << " / " << range << std::endl;
-      }
+      completedTasks.fetch_add(1);
     }
-  }
-  catch (const std::exception& e) {
-    std::cout << "\nAn exception occurred in a thread:\n" << e.what() << std::endl;
-    exitThreads.store(true);
-  }
-  catch (...) {
-    std::cout << "\nAn unknown exception occurred in a thread" << std::endl;
-    exitThreads.store(true);
-  }
+    activeThreads.fetch_sub(1);
+  });
+
+  isGeneratingDone.store(true);
+  progressReporter.join();
+  std::cout << "\n[INFO]: Template generation completed." << std::endl;
 }
+
 
 int main(int argc, char* argv[]){
   cxxopts::Options options("cx", "CyberExtruder 6.1.5 | Template Generator");
@@ -206,7 +232,7 @@ int main(int argc, char* argv[]){
   options.add_options()
     ("o,output", "Directory where to store templates", cxxopts::value<std::string>())
     ("d,directory", "Gallery directory", cxxopts::value<std::string>())
-    ("t,threads", "Number of threads", cxxopts::value<int>()->default_value("-1")) // Default to -1 for auto
+    // ("t,threads", "Number of threads", cxxopts::value<int>()->default_value("-1")) // Default to -1 for auto
     ("h,help", "Print help");
 
   auto result = options.parse(argc, argv);
@@ -226,11 +252,6 @@ int main(int argc, char* argv[]){
   std::filesystem::path directory = result["output"].as<std::string>();
   std::filesystem::path missingFilename = "missing.txt";
   std::filesystem::path completedFilename = "summary.txt";
-  int numThreads = result["threads"].as<int>();
-
-  if (numThreads == -1) {
-    numThreads = std::thread::hardware_concurrency() / 2;
-  }
 
   std::filesystem::path templatePath = directory / "templates";
   std::filesystem::path summaryPath = directory / "summary";
@@ -249,16 +270,7 @@ int main(int argc, char* argv[]){
   std::filesystem::path missingPath = summaryPath / missingFilename;
   std::filesystem::path completedPath = summaryPath / completedFilename;
 
-  // Set up the SIGINT and SIGTERM signal handlers
-  if (signal(SIGINT, signalHandler) == SIG_ERR) {
-    std::cerr << "Error setting up SIGINT signal handler." << std::endl;
-    return 1;
-  }
-
-  if (signal(SIGTERM, signalHandler) == SIG_ERR) {
-    std::cerr << "Error setting up SIGTERM signal handler." << std::endl;
-    return 1;
-  }
+  setupSignalHandlers();
   
   char msg[1024];
   int load_gallery = 0; 
@@ -281,7 +293,6 @@ int main(int argc, char* argv[]){
   // Setting Application Name
   strcpy(msg, "Aureus Xavi");
   CX_SetAppInfo(p_aureus, msg);
-  // CX_SetInitializationCallBack(p_aureus, Aureus_Init_CallBack, NULL, msg);
 
   if (!CX_GetVersion(p_aureus, msg)) printf("Failed to get Aureus Version:\n%s\n", msg);
   else printf("Aureus Version = %s\n", msg);
@@ -289,7 +300,6 @@ int main(int argc, char* argv[]){
   string g_install_dir;
   GetExecutablePath(g_install_dir);
 
-  // Looking for that file that needs to be there
   string fname = g_install_dir + "/ADL_HNN.data";
   if (!FileExists(fname.c_str())){
     g_install_dir = "./";
@@ -322,7 +332,6 @@ int main(int argc, char* argv[]){
       if (n_engines < 0){
         printf("%s\n", msg);
         freeAureus();
-        // CX_FreeAureus(p_aureus, msg);
         return 0;
       } else {
         printf("There are %d FR engines\n", n_engines);
@@ -346,13 +355,8 @@ int main(int argc, char* argv[]){
         }
       }
 
-      // if we are using FR with a gallery make sure it's up to date
-      // only reason it would be out of date (apart from corruption) is
-      // if we have added a new engine
       if (use_fr){
-        // register an FR update callback (will print info during update)
         CX_SetUpdateFRCallBack(p_aureus, FRupdateCallback, NULL, msg);
-        // update the FR (this just makes sure all templates are present)
         CX_UpdateFR(p_aureus, msg);
         printf("\n"); 
       }
@@ -371,7 +375,7 @@ int main(int argc, char* argv[]){
   fdp.m_max_height_prop = 0.8;
 
   const std::vector<std::string> fileExtensions = {".jpg", ".jpeg", ".JPG", ".JPEG"};
-  std::vector<std::string> paths = getFilesWithExtensions(gallery, fileExtensions);
+  paths = getFilesWithExtensions(gallery, fileExtensions);
   int numberFiles = paths.size();
   std::cout << "Found " << numberFiles << " images." << std::endl;
 
@@ -381,32 +385,8 @@ int main(int argc, char* argv[]){
     return 0;
   }
 
-  std::vector<std::thread> templateThreads;
-  templateThreads.reserve(numThreads);
-
   std::cout << "[INFO] Template Generation Started!" << std::endl;
-  unsigned long batchSize = std::ceil(static_cast<double>(numberFiles) / numThreads);
-  std::cout << "[INFO] Threads: " << numThreads << " | Template Generation Batch Size: " << batchSize << std::endl;
-
-  int modulus = int(batchSize * 0.1);
-  if (modulus < 2) modulus = 1;
-
-  for (int i = 0; i < numThreads; i++) {
-    unsigned long start = i * batchSize;
-    unsigned long end = (i == numThreads - 1) ? numberFiles : (i + 1) * batchSize;
-    auto threadFunc = std::bind(generateTemplates, (i+1), std::ref(paths), std::ref(templatePath), &p_aureus, &fdp, templateSize, msg, modulus, start, end);
-    templateThreads.emplace_back(threadFunc);
-  }
-
-  for (auto& thread : templateThreads) {
-    thread.join();
-  }
-
-  if (exitThreads.load()) {
-    freeAureus();
-    std::cout << "[INFO] Exiting the program." << std::endl;
-    exit(EXIT_SUCCESS); // Terminate the program
-  }
+  generateTemplates(std::ref(templatePath), &p_aureus, &fdp, templateSize);
 
   std::cout << "[INFO] Template Generation Done!" << std::endl;
   if (fte.size() > 0){
